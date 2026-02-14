@@ -328,8 +328,8 @@ Follow the steps below to run the project locally.
 ## 1. Clone the Repository
 
 ```
-git clone <your-repository-link>
-cd financial-document-analysis
+git clone https://github.com/chhavviii/Finance-Document-Analyzer.git
+cd Finance-Document-Analyzer
 ```
 
 ---
