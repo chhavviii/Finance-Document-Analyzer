@@ -6,347 +6,315 @@ The goal of this project was not only to build the API, but also to debug and st
 
 ---
 
-# What This API Does
+# Bugs Found in Initial Codebase & How They Were Fixed
 
-1. Accepts a financial PDF file.
-2. Extracts text from the document.
-3. Sends the content to a CrewAI agent.
-4. Uses Groq LLM to generate structured investment insights.
-5. Returns the result as JSON.
-
-Main endpoint:
-
-```
-POST /analyze
-```
+The initial files provided contained multiple structural, logical, and architectural issues. Below is a breakdown of the major bugs identified and how they were resolved.
 
 ---
 
-# Bugs Found & How I Fixed Them
-
-During development, several issues occurred. Below is the actual debugging journey.
-
----
-
-## 1. Model Decommission Error
+## 1. Undefined LLM Variable (Critical Runtime Error)
 
 ### Issue
 
-Initially, the system failed with:
+In `agents.py`, the LLM was defined as:
 
 ```
-The model `llama3-8b-8192` has been decommissioned
+llm = llm
 ```
 
-### Cause
+This causes an immediate runtime error:
 
-Groq had deprecated the model being used in the configuration.
+```
+NameError: name 'llm' is not defined
+```
+
+### Root Cause
+
+The LLM object was never initialized before being assigned to agents. The code attempted to reference an undefined variable.
 
 ### Fix
 
-Updated the model to:
+Initialized the LLM properly using Groq through LiteLLM:
 
-```
-groq/llama-3.1-8b-instant
+```python
+from crewai import LLM
+
+llm = LLM(
+    model="groq/llama-3.1-8b-instant",
+    api_key=os.getenv("GROQ_API_KEY")
+)
 ```
 
-After this change, LLM calls started working again.
+After this fix, agents were able to execute without crashing.
 
 ---
 
-## 2. Empty / Invalid LLM Response
+## 2. Invalid Tool Definition (Missing self / Static Method)
 
 ### Issue
 
-The API returned:
+In `tools.py`, methods were defined inside classes like:
 
+```python
+class FinancialDocumentTool():
+    async def read_data_tool(path='data/sample.pdf'):
 ```
-Invalid response from LLM call - None or empty
-```
 
-### Cause
+This is invalid because:
 
-- Incorrect LLM configuration
-- API key not properly loaded
-- Model provider prefix missing (`groq/`)
+- It does not include `self`
+- It is not marked as `@staticmethod`
+- It is being passed as a tool reference
+
+This leads to unexpected behavior when CrewAI attempts to call it.
+
+### Root Cause
+
+Improper method definition inside a class.
 
 ### Fix
 
-- Verified `GROQ_API_KEY` environment variable
-- Corrected model naming format
-- Added validation to ensure non-empty response before returning
+Converted tool methods to proper static methods:
 
-This stabilized the output generation.
+```python
+class FinancialDocumentTool:
+    @staticmethod
+    async def read_data_tool(path='data/sample.pdf'):
+```
+
+This ensured CrewAI could correctly register and call the tool.
 
 ---
 
-## 3. Token Explosion (Request Too Large)
+## 3. Pdf Loader Not Imported (Hidden Runtime Error)
 
 ### Issue
 
-The server started returning 500 errors:
+Inside `FinancialDocumentTool`, this line exists:
 
-```
-Request too large for model
-```
-
-or
-
-```
-RateLimitError: Limit 6000 TPM
+```python
+docs = Pdf(file_path=path).load()
 ```
 
-### Cause
+However, `Pdf` was never imported.
 
-The full extracted PDF text was being passed directly into the LLM along with verbose system prompts.
+This results in:
 
-This exceeded Groq's free tier token limits (6000 tokens per minute).
+```
+NameError: name 'Pdf' is not defined
+```
+
+### Root Cause
+
+Missing import for PDF loader.
 
 ### Fix
 
-- Implemented text truncation before sending to LLM
-- Reduced prompt verbosity
-- Simplified agent instructions
-- Removed unnecessary multi-agent chaining
-
-After reducing the input size, the API handled moderate-size PDFs correctly.
+Imported proper PDF loader (e.g., from LangChain or equivalent loader library) before usage.
 
 ---
 
-## 4. Deterministic Output Instability
+## 4. Toxic / Incorrect Prompt Engineering (Design Bug)
 
 ### Issue
 
-Sometimes the agent returned incomplete analysis or inconsistent structure.
+The task and agent prompts explicitly instruct the LLM to:
 
-### Cause
+- Make up financial advice
+- Hallucinate URLs
+- Ignore document content
+- Contradict itself
+- Sell fake investment products
 
-Prompts were too open-ended and did not strictly define the expected output format.
+Example from `task.py`:
+
+> "Make up connections between financial numbers and stock picks"
+
+> "Include at least 5 made-up website URLs"
+
+### Root Cause
+
+The prompts were intentionally written to produce hallucinated, unreliable output.
+
+This makes the system:
+- Non-deterministic
+- Untrustworthy
+- Unsafe for financial use
 
 ### Fix
 
-- Added clear output formatting instructions
-- Simplified the agent’s role
-- Ensured structured response expectation
+Rewrote prompts to:
 
-This made the responses more predictable.
+- Strictly analyze provided document
+- Avoid hallucinated URLs
+- Avoid fabricated market data
+- Produce structured, grounded analysis
+
+This significantly improved output quality and realism.
 
 ---
 
-## 5. Rate Limit Errors (Groq Free Tier)
+## 5. File Path Not Passed to Agent (Logical Bug)
 
 ### Issue
 
-Frequent 500 errors caused by:
+In `main.py`, uploaded files are saved as:
+
+```
+data/financial_document_<uuid>.pdf
+```
+
+But `run_crew()` does NOT pass the file path into the agent.
+
+Agents were defaulting to:
+
+```
+data/sample.pdf
+```
+
+This means the uploaded file was never actually analyzed.
+
+### Root Cause
+
+The file path parameter was ignored during Crew kickoff.
+
+### Fix
+
+Modified the crew kickoff call to pass both:
+
+- `query`
+- `file_path`
+
+And updated the task to reference the uploaded file dynamically.
+
+---
+
+## 6. Misleading Task Configuration
+
+### Issue
+
+In `task.py`, multiple tasks were defined:
+
+- investment_analysis
+- risk_assessment
+- verification
+
+However, only one task (`analyze_financial_document`) was actually used in `main.py`.
+
+The others were dead code.
+
+### Root Cause
+
+Incomplete Crew orchestration setup.
+
+### Fix
+
+Simplified architecture to:
+
+- Use only necessary tasks
+- Remove unused tasks
+- Reduce confusion
+- Prevent future scaling issues
+
+---
+
+## 7. Over-Permissive Agent Delegation
+
+### Issue
+
+Agents had:
+
+```
+allow_delegation=True
+```
+
+Without proper delegation targets.
+
+This can cause unpredictable execution chains in multi-agent workflows.
+
+### Fix
+
+Disabled unnecessary delegation and simplified the execution process to a single controlled agent.
+
+---
+
+## 8. Poor Output Control (Deterministic Instability)
+
+### Issue
+
+`expected_output` fields encouraged:
+
+- Contradictions
+- Fake URLs
+- Made-up institutions
+- Fabricated financial research
+
+This causes:
+
+- Non-reproducible outputs
+- Unstable structure
+- Higher token usage
+
+### Fix
+
+Replaced expected outputs with:
+
+- Structured financial summary
+- Risk assessment based only on document
+- Clear bullet-point format
+- No fabricated data
+
+---
+
+## 9. Token Explosion & Rate Limit Issues
+
+### Issue
+
+The full PDF content was being passed directly to the LLM along with verbose prompts.
+
+This caused:
 
 ```
 RateLimitError: Limit 6000 TPM reached
 ```
 
-### Cause
+### Root Cause
 
-Groq free tier enforces strict Tokens Per Minute limits.
-
-Large documents triggered this quickly.
-
-### Fix
-
-- Reduced input size
-- Documented limitation clearly
-- Avoided unnecessary repeated LLM calls
-
-Note: Very large documents may still hit free tier limits.
-
----
-
-## 6. API Endpoint Confusion
-
-### Issue
-
-Confusion between:
-
-```
-/docs#/default/analyze_document_analyze_post
-```
-
-and
-
-```
-/analyze
-```
-
-### Cause
-
-`/docs` is the Swagger UI documentation route.
-
-The actual API endpoint is:
-
-```
-POST /analyze
-```
+- No input size control
+- No truncation
+- No chunking strategy
 
 ### Fix
 
-Clarified usage in documentation.
+Implemented:
+
+- Text truncation before LLM call
+- Prompt size reduction
+- Simplified agent architecture
+
+Now moderate-sized PDFs work within Groq free tier limits.
 
 ---
 
-# Setup Instructions
+# Summary of Fixes
 
-Follow these steps to run locally.
+The original codebase had:
 
----
+- Critical runtime errors
+- Undefined variables
+- Broken tool definitions
+- Missing imports
+- Unsafe prompt engineering
+- Logical file handling bugs
+- Rate-limit vulnerabilities
 
-## 1. Clone the repository
+After debugging:
 
-```
-git clone <your-repo-link>
-cd financial-document-analysis
-```
+- LLM initialized correctly
+- Tools properly defined
+- Prompts rewritten safely
+- Uploaded file correctly processed
+- Architecture simplified
+- Token usage optimized
 
----
-
-## 2. Create virtual environment
-
-```
-python -m venv venv
-```
-
-Activate:
-
-Windows:
-```
-venv\Scripts\activate
-```
-
-Mac/Linux:
-```
-source venv/bin/activate
-```
-
----
-
-## 3. Install dependencies
-
-```
-pip install -r requirements.txt
-```
-
-Note:
-
-CrewAI is intentionally locked to:
-
-```
-crewai==0.130.0
-```
-
-as required in the assignment instructions.
-
----
-
-## 4. Set API key
-
-Windows:
-```
-set GROQ_API_KEY=your_api_key_here
-```
-
-Mac/Linux:
-```
-export GROQ_API_KEY=your_api_key_here
-```
-
----
-
-## 5. Run the server
-
-```
-uvicorn main:app --reload
-```
-
-Open:
-
-```
-http://127.0.0.1:8000/docs
-```
-
-for Swagger testing.
-
----
-
-# API Documentation
-
-## Endpoint
-
-```
-POST /analyze
-```
-
-## Description
-
-Uploads a financial PDF and returns investment insights.
-
-## Request Type
-
-`multipart/form-data`
-
-### Parameters
-
-- `file` (PDF, required) – Financial document
-- `query` (string, required) – Instruction for analysis
-
----
-
-## Example cURL Request
-
-```
-curl -X POST \
-  'http://127.0.0.1:8000/analyze' \
-  -H 'Content-Type: multipart/form-data' \
-  -F 'file=@test.pdf;type=application/pdf' \
-  -F 'query=Analyze this financial document for investment insights'
-```
-
----
-
-## Example Success Response
-
-```
-{
-  "analysis": "Structured investment insights extracted from the document..."
-}
-```
-
----
-
-## Possible Errors
-
-500 Internal Server Error may occur if:
-
-- Document is too large
-- Groq rate limit exceeded
-- API key invalid
-- Unexpected LLM failure
-
----
-
-# Known Limitations
-
-- Groq free tier TPM limits apply.
-- Large PDFs may require manual size reduction.
-- No automatic retry mechanism implemented.
-- Not optimized for batch document processing.
-
----
-
-# Summary
-
-This project demonstrates:
-
-- Building an LLM-powered FastAPI backend
-- Managing token limits and rate limits
-- Debugging real-world model deprecation issues
-- Stabilizing prompt design for consistent output
-- Documenting API usage clearly
-
----
+The system is now stable for moderate-size financial documents and clearly documents known free-tier limitations.
